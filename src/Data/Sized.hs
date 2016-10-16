@@ -7,18 +7,27 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE PolyKinds #-}
 
+-- | The @sized-foldable@ library allows the compiler to reason about
+-- the length of foldables.  You'll need in your code the DataKinds
+-- and the TypeOperators extension to use it.  It is recommended to
+-- use as well PartialTypeSignatures for better type level
+-- programming.
+
 module Data.Sized
-  ( type (...)
+  ( -- * Types and constructors
+    type (...)
   , Infinity
   , Infinite
   , mkSized
   , fromList
   , toList
+    -- * Type level functions
   , (:+:)
   , (:-:)
   , (:*:)
   , Min
   , Max
+    -- * Functions operating on sized lists
   , (\\)
   , (++)
   , take
@@ -65,6 +74,36 @@ import qualified Data.List as L
 import GHC.TypeLits
 import Data.Proxy (Proxy(..))
 
+{-|
+The annotation type for sized foldables.
+
+* @n@: The lower bound of the length
+
+    @
+    0 '<=' n
+    @
+
+* @m@: The upper bound of the length
+
+    @
+    n '<=' m
+    m '<=' 'Infinity'
+    @
+
+* @o@: The type which will be contained in the foldable
+
+Example usage:
+
+@
+myEmptyListOfInts :: (0'...'0) 'Integer'
+
+aShortList        :: (0'...'4) 'Bool'
+
+aQuadraticMatrix  :: (m'...'m) ((m'...'m) 'Double')
+
+aNonEmptyList     :: (1 '<=' m) => (m'...'n) a
+@
+-}
 data (...) (n :: Nat) (m :: Nat) o where
   Sized :: (n <= m) => [o] -> (n...m) o
 
@@ -102,59 +141,47 @@ instance (1 <= a) => Traversable (a...b) where
   traverse f (Sized xs) = Sized <$> traverse f xs
 
 type (∞) = 18446744073709551616 -- One more than maxBound of Word64
+
+{-|
+A 'Nat' which represents Infinity
+
+@
+m '<=' 'Infinity'
+@
+
+Example usage:
+
+@
+anArbitraryList :: (0 '...' 'Infinity') a
+
+aStream         :: ('Infinity' '...' 'Infinity') a
+@
+-}
 type Infinity = (∞) -- This indirection is to avoid showing the number of Infinity
+
+{-|
+A shorthand for an infinite foldable
+
+Example usage:
+
+@
+primes :: 'Infinite' 'Integer'
+@
+-}
 type Infinite = Infinity ... Infinity
 
--- | Typelevel operators which respect `Infinity`
+{-|
+Smart constructor for a sized foldable which checks wether the
+given lists length is within the specified bounds.
 
-type family (:+:) a b where
-  Infinity :+: _ = Infinity
-  _ :+: Infinity = Infinity
-  a :+: b = a + b
+Example usage:
 
-type family (:-:) a b where
-  Infinity :-: _ = Infinity
-  a :-: 0 = a
-  0 :-: a = TypeError ('Text "Negative length")
-  a :-: b = (a-1) :-: (b-1)
+>>> mkSized [False, True] :: Maybe ((0...3) Bool)
+Just |[False,True]| ∈ {0, 1, 2, 3}
 
-type family (:*:) a b where
-  0 :*: _ = 0
-  _ :*: 0 = 0
-  Infinity :*: _ = Infinity
-  _ :*: Infinity = Infinity
-  a :*: b = a * b
-
-type family Max a b where
-  Max Infinity _ = Infinity
-  Max _ Infinity = Infinity
-  Max a b = If (a <=? b) b a
-
-type family Min a b where
-  Min Infinity a = a
-  Min a Infinity = a
-  Min a b = If (a <=? b) a b
-
--- | Typelevel utility functions
-
-type family (:==:) (a::Nat) (b::Nat) where
-  a :==: a = 'True
-  _ :==: _ = 'False
-
-type family If a b c where
-  If 'True b _ = b
-  If 'False _ c = c
-
-type family (:&&:) a b where
-  'True :&&: 'True = 'True
-  _ :&&: _ = 'False
-
-type family (:||:) a b where
-  a :||: 'False = a
-  'False :||: a = a
-
--- | Exported functions
-
+>>> mkSized [False, True] :: Maybe ((3...4) Bool)
+Nothing
+-}
 mkSized
   :: ( KnownNat m
      , KnownNat n
@@ -172,17 +199,83 @@ mkSized xs
           f _ = (Proxy, Proxy)
           len = fromIntegral $ L.length xs
 
+{-|
+Convert any list into a sized foldable without checking bounds.
+The compiler knows nothing about its length.
+
+>>> fromList [False,True]
+|[False,True]| ∈ {0, 1, ...}
+-}
 fromList
   :: [a]
   -> (0...Infinity) a
 fromList
   = Sized
 
+{-|
+Demote a sized foldable to a simple list and forget about its length.
+
+>>> toList (fromList [1,2])
+[1,2]
+-}
 toList
   :: (a...b) c
   -> [c]
 toList (Sized x)
   = x
+
+-- | Addition wich respects 'Infinity'
+type family (:+:) a b where
+  Infinity :+: _ = Infinity
+  _ :+: Infinity = Infinity
+  a :+: b = a + b
+
+-- | Subtraction wich respects 'Infinity'
+type family (:-:) a b where
+  Infinity :-: _ = Infinity
+  a :-: 0 = a
+  0 :-: a = TypeError ('Text "Negative length")
+  a :-: b = (a-1) :-: (b-1)
+
+-- | Multiplication wich respects 'Infinity'
+type family (:*:) a b where
+  0 :*: _ = 0
+  _ :*: 0 = 0
+  Infinity :*: _ = Infinity
+  _ :*: Infinity = Infinity
+  a :*: b = a * b
+
+-- | Maximum wich respects 'Infinity'
+type family Max a b where
+  Max Infinity _ = Infinity
+  Max _ Infinity = Infinity
+  Max a b = If (a <=? b) b a
+
+-- | Minimum wich respects 'Infinity'
+type family Min a b where
+  Min Infinity a = a
+  Min a Infinity = a
+  Min a b = If (a <=? b) a b
+
+-- | Equality for 'Nat'
+type family (:==:) (a::Nat) (b::Nat) where
+  a :==: a = 'True
+  _ :==: _ = 'False
+
+-- | Type level control flow
+type family If a b c where
+  If 'True b _ = b
+  If 'False _ c = c
+
+-- | Type level '&&'
+type family (:&&:) a b where
+  'True :&&: 'True = 'True
+  _ :&&: _ = 'False
+
+-- | Type level '||'
+type family (:||:) a b where
+  a :||: 'False = a
+  'False :||: a = a
 
 (\\)
   :: ( Eq a
