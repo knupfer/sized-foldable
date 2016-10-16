@@ -1,7 +1,10 @@
 name:                sized-foldable
 version:             0.1.0.0
 synopsis:            Annotes foldables with their minimum and maximum size without performance impact
-description:         This library allows for compile time reasoning of the length of foldables without runtime impact.  It knows for example, that if you take 2 of any list, the length of the resulting list will be between 0 and 2.  Or it prevents you from calling last on a list which may be infinite.
+description:
+            This library allows for compile time reasoning of the length of foldables without runtime impact.
+            It knows for example, that if you take 2 of any list, the length of the resulting list will be between 0 and 2.
+            Or it prevents you from calling last on a list which may be infinite.
 license:             MIT
 license-file:        LICENSE
 author:              Florian Knupfer
