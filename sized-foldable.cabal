@@ -1,5 +1,5 @@
 name:                sized-foldable
-version:             0.1.0.0
+version:             0.1.1.0
 synopsis:            Annotes foldables with their minimum and maximum size without performance impact
 description:
             This library allows for compile time reasoning of the length of foldables without runtime impact.
