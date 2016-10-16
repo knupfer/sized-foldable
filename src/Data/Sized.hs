@@ -76,8 +76,21 @@ instance Eq o => Eq ((n...m) o) where
 instance Ord o => Ord ((n...m) o) where
   compare (Sized a) (Sized b) = compare a b
 
-instance Show o => Show ((n...m) o) where
-  show (Sized a) = show a
+instance (KnownNat n, KnownNat m, Show o) => Show ((n...m) o) where
+  show s@(Sized a) = "|" L.++ showFoldable L.++ "|" L.++ cardinality
+    where
+      (lower,upper) = (\(x,y) -> (natVal x, natVal y)) (f s)
+      f :: (n...m) o -> (Proxy n, Proxy m)
+      f _ = (Proxy, Proxy)
+      showFoldable
+        | L.length (L.take 25 $ show a) < 25 = show a
+        | otherwise = L.take 24 (show a) L.++ "..."
+      cardinality
+        | lower == natVal (Proxy :: Proxy Infinity) = " = ℵ₀"
+        | lower == upper = " = " L.++ show lower
+        | upper == natVal (Proxy :: Proxy Infinity) = " ∈ {" L.++ show lower L.++ ", " L.++ show (succ lower) L.++ ", ...}"
+        | upper - lower < 4 = " ∈ {" L.++ L.concat (L.intersperse ", " (L.map show [lower..upper])) L.++ "}"
+        | otherwise = " ∈ {" L.++ show lower L.++ ", ..., " L.++ show upper L.++ "}"
 
 instance Functor (a...b) where
   fmap f (Sized x) = Sized $ fmap f x
