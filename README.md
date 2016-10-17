@@ -44,10 +44,10 @@ Remember that `tail` is a partial function...
 ```haskell
 f = parens
   . S.intersperse ","
-  . getFoos
+  . getMembers
   . S.tail
   where parens     = S.cons "(" . S.snoc ")"
-        getFoos    = S.filter (`elem` filterList)
+        getMembers = S.filter (`elem` filterList)
         filterList = "A" <| "B" <| "C" <| "D" <| S.empty
 ```
 
