@@ -1,3 +1,5 @@
+{-# OPTIONS_GHC -fplugin GHC.TypeLits.Normalise -fplugin GHC.TypeLits.KnownNat.Solver -fplugin GHC.TypeLits.Extra.Solver #-}
+{-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
@@ -6,6 +8,8 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 
 -- | The @sized-foldable@ library allows the compiler to reason about
 -- the length of foldables.  You'll need in your code the DataKinds
@@ -21,15 +25,12 @@ module Data.Sized
   , mkSized
   , fromList
   , toList
-    -- * Type level functions
-  , (:+:)
-  , (:-:)
-  , (:*:)
-  , Min
-  , Max
+    -- * Helper functions
+  , getCardinality
     -- * Functions operating on sized lists
   , (\\)
   , (++)
+  , (<|)
   , take
   , drop
   , all
@@ -50,6 +51,9 @@ module Data.Sized
   , insert
   , singleton
   , length
+  , reverse
+  , filter
+  , intersperse
   ) where
 
 import Prelude hiding
@@ -68,11 +72,17 @@ import Prelude hiding
   , last
   , replicate
   , length
+  , reverse
+  , filter
   )
 
 import qualified Data.List as L
+
+import Data.Proxy
 import GHC.TypeLits
-import Data.Proxy (Proxy(..))
+import GHC.TypeLits.Extra
+
+import Data.Type.Equality
 
 {-|
 The annotation type for sized foldables.
@@ -87,7 +97,6 @@ The annotation type for sized foldables.
 
     @
     n '<=' m
-    m '<=' 'Infinity'
     @
 
 * @o@: The type which will be contained in the foldable
@@ -104,35 +113,9 @@ aQuadraticMatrix  :: (m'...'m) ((m'...'m) 'Double')
 aNonEmptyList     :: (1 '<=' m) => (m'...'n) a
 @
 -}
-data (...) (n :: Nat) (m :: Nat) o where
-  Sized :: (n <= m) => [o] -> (n...m) o
+newtype (...) (n :: Nat) (m :: Nat) o = Sized [o] deriving (Eq, Ord, Show, Functor)
 
 infixr 0 ...
-
-instance Eq o => Eq ((n...m) o) where
-  Sized xs == Sized ys = xs == ys
-
-instance Ord o => Ord ((n...m) o) where
-  compare (Sized a) (Sized b) = compare a b
-
-instance (KnownNat n, KnownNat m, Show o) => Show ((n...m) o) where
-  show s@(Sized a) = "|" L.++ showFoldable L.++ "|" L.++ cardinality
-    where
-      (lower,upper) = (\(x,y) -> (natVal x, natVal y)) (f s)
-      f :: (n...m) o -> (Proxy n, Proxy m)
-      f _ = (Proxy, Proxy)
-      showFoldable
-        | L.length (L.take 25 $ show a) < 25 = show a
-        | otherwise = L.take 24 (show a) L.++ "..."
-      cardinality
-        | lower == natVal (Proxy :: Proxy Infinity) = " = ℵ₀"
-        | lower == upper = " = " L.++ show lower
-        | upper == natVal (Proxy :: Proxy Infinity) = " ∈ {" L.++ show lower L.++ ", " L.++ show (succ lower) L.++ ", ...}"
-        | upper - lower < 4 = " ∈ {" L.++ L.concat (L.intersperse ", " (L.map show [lower..upper])) L.++ "}"
-        | otherwise = " ∈ {" L.++ show lower L.++ ", ..., " L.++ show upper L.++ "}"
-
-instance Functor (a...b) where
-  fmap f (Sized x) = Sized $ fmap f x
 
 instance (1 <= a) => Foldable (a...b) where
   foldr f acc (Sized x) = L.foldr f acc x
@@ -140,14 +123,22 @@ instance (1 <= a) => Foldable (a...b) where
 instance (1 <= a) => Traversable (a...b) where
   traverse f (Sized xs) = Sized <$> traverse f xs
 
-type (∞) = 18446744073709551616 -- One more than maxBound of Word64
+getCardinality
+  :: forall m n o.
+     ( KnownNat m
+     , KnownNat n
+     )
+  => (m...n) o
+  -> (Integer, Integer)
+getCardinality _
+  = ( natVal (Proxy :: Proxy m)
+    , natVal (Proxy :: Proxy n)
+    )
 
 {-|
-A 'Nat' which represents Infinity
-
-@
-m '<=' 'Infinity'
-@
+'Infinity' represents a very big 'Nat' (maxBound :: Word64).  It is
+only for convenience and not treated like a special value by the
+compiler.
 
 Example usage:
 
@@ -155,9 +146,12 @@ Example usage:
 anArbitraryList :: (0 '...' 'Infinity') a
 
 aStream         :: ('Infinity' '...' 'Infinity') a
+
+allInput :: IO ((0...'Infinity') String)
+allInput = fromList . lines <$> getContents
 @
 -}
-type Infinity = (∞) -- This indirection is to avoid showing the number of Infinity
+type Infinity = 18446744073709551615
 
 {-|
 A shorthand for an infinite foldable
@@ -183,21 +177,20 @@ Just |[False,True]| ∈ {0, 1, 2, 3}
 Nothing
 -}
 mkSized
-  :: ( KnownNat m
+  :: forall m n a.
+     ( KnownNat m
      , KnownNat n
      , m <= n
      )
   => [a]
   -> Maybe ((m...n) a)
 mkSized xs
-  = res
-    where res = if natVal (fst $ f res) <= len
-                && len <= natVal (snd $ f res)
-                then Just $ Sized xs
-                else Nothing
-          f :: Maybe ((m...n) a) -> (Proxy m, Proxy n)
-          f _ = (Proxy, Proxy)
-          len = fromIntegral $ L.length xs
+  | monotonic [natVal (Proxy :: Proxy m), len, natVal (Proxy :: Proxy n)]
+    = Just $ Sized xs
+  | otherwise = Nothing
+    where len = fromIntegral $ L.length xs
+          monotonic :: [Integer] -> Bool
+          monotonic ms = L.all (uncurry (<=)) $ L.zip ms (L.tail ms)
 
 {-|
 Convert any list into a sized foldable without checking bounds.
@@ -207,10 +200,12 @@ The compiler knows nothing about its length.
 |[False,True]| ∈ {0, 1, ...}
 -}
 fromList
-  :: [a]
-  -> (0...Infinity) a
+  :: forall a b.
+     KnownNat b
+  => [a]
+  -> (0...b) a
 fromList
-  = Sized
+  = take . (Sized :: [a] -> (0...b) a)
 
 {-|
 Demote a sized foldable to a simple list and forget about its length.
@@ -224,116 +219,45 @@ toList
 toList (Sized x)
   = x
 
--- | Addition wich respects 'Infinity'
-type family (:+:) a b where
-  Infinity :+: _ = Infinity
-  _ :+: Infinity = Infinity
-  a :+: b = a + b
-
--- | Subtraction wich respects 'Infinity'
-type family (:-:) a b where
-  Infinity :-: _ = Infinity
-  a :-: 0 = a
-  0 :-: a = TypeError ('Text "Negative length")
-  a :-: b = (a-1) :-: (b-1)
-
--- | Multiplication wich respects 'Infinity'
-type family (:*:) a b where
-  0 :*: _ = 0
-  _ :*: 0 = 0
-  Infinity :*: _ = Infinity
-  _ :*: Infinity = Infinity
-  a :*: b = a * b
-
--- | Maximum wich respects 'Infinity'
-type family Max a b where
-  Max Infinity _ = Infinity
-  Max _ Infinity = Infinity
-  Max a b = If (a <=? b) b a
-
--- | Minimum wich respects 'Infinity'
-type family Min a b where
-  Min Infinity a = a
-  Min a Infinity = a
-  Min a b = If (a <=? b) a b
-
--- | Equality for 'Nat'
-type family (:==:) (a::Nat) (b::Nat) where
-  a :==: a = 'True
-  _ :==: _ = 'False
-
--- | Type level control flow
-type family If a b c where
-  If 'True b _ = b
-  If 'False _ c = c
-
--- | Type level '&&'
-type family (:&&:) a b where
-  'True :&&: 'True = 'True
-  _ :&&: _ = 'False
-
--- | Type level '||'
-type family (:||:) a b where
-  a :||: 'False = a
-  'False :||: a = a
-
 (\\)
-  :: ( Eq a
-     , (m:-:Min m p) <= n
-     )
+  :: Eq a
   => (m...n) a
   -> (o...p) a
-  -> ((m:-:Min m p)...n) a
+  -> ((m-Min m p)...n) a
 Sized xs \\ Sized ys
   = Sized $ xs L.\\ ys
 
+infixr 5 <|
+(<|) = cons
+
 (++)
-  :: ( CmpNat m Infinity ~ LT
-     , (m:+:o) <= (n:+:p)
-     )
-  => (m...n) a
+  :: (m...n) a
   -> (o...p) a
-  -> ((m:+:o)...(n:+:p)) a
+  -> ((m+o)...(n+p)) a
 Sized xs ++ Sized ys
   = Sized $ xs L.++ ys
 
 take
-  :: ( KnownNat p
+  :: forall p m n a.
+     ( KnownNat p
      , p <= n
-     , o <= p
-     , o <= m
-     , If (p <=? m) (o ~ p) (o ~ m)
      )
   => (m...n) a
-  -> (o...p) a
+  -> (Min m p...p) a
 take xs
-  = res
-    where res = Sized
-                . L.take (fromIntegral . natVal $ right res)
-                $ toList xs
-          right :: (o...p) a -> Proxy p
-          right _ = Proxy
+  = Sized
+    . L.take (fromIntegral $ natVal (Proxy :: Proxy p))
+    $ toList xs
 
 drop
-  :: ( KnownNat (Max (c:-:e) (d:-:f))
-     , e <= c
-     , f <= d
-     , e <= f
-     , If (d :==: Infinity)
-          (d~f)
-          (If (e :==: 0)
-              ((f:-:e) <= (d:-:c))
-              ((f:-:e) ~ (d:-:c)))
-     )
+  :: forall d f c a.
+     KnownNat (d-f)
   => (c...d) a
-  -> (e...f) a
+  -> ((c - Min c (d-f))...f) a
 drop
-  = f
-    where f = Sized
-            . L.drop (fromIntegral . natVal $ right f)
-            . toList
-          right :: ((o...p) a -> (x...y) a) -> Proxy (Max (o:-:x) (p:-:y))
-          right _ = Proxy
+  = Sized
+    . L.drop (fromIntegral $ natVal (Proxy :: Proxy (d-f)))
+    . toList
 
 all
   :: (a -> Bool)
@@ -366,41 +290,44 @@ and :: (a...b) Bool -> Bool
 and = L.and . toList
 
 concatMap
-  :: (s:*:p) <= (t:*:q)
-  => (a -> (p...q) b)
+  :: (a -> (p...q) b)
   -> (s...t) a
-  -> ((s:*:p)...(t:*:q)) b
+  -> ((s*p)...(t*q)) b
 concatMap f xs = concat (fmap f xs)
 
 concat
-  :: (m:*:o) <= (n:*:p)
-  => (m...n) ((o...p) a)
-  -> ((m:*:o)...(n:*:p)) a
+  :: (m...n) ((o...p) a)
+  -> ((m*o)...(n*p)) a
 concat = Sized . L.concatMap toList . toList
 
 empty :: (0...0) a
 empty = Sized []
 
 cycle
-  :: 1 <= m
+  :: forall m n a o.
+     ( KnownNat o
+     , 1 <= m
+     )
   => (m...n) a
-  -> Infinite a
-cycle
-  = Sized
+  -> (o...o) a
+cycle xs
+  = take
+    . (Sized :: [a] -> (o...o) a)
     . L.cycle
-    . toList
+    $ toList xs
 
 tail
-  :: (m:-:1) <= (n:-:1)
+  :: 1 <= m
   => (m...n) a
-  -> ((m:-:1)...(n:-:1)) a
+  -> ((m-1)...(n-1)) a
 tail
   = Sized
     . L.tail
     . toList
 
 head
-  :: 1 <= m
+  :: forall m n a.
+     1 <= m
   => (m...n) a
   -> a
 head
@@ -408,9 +335,7 @@ head
     . toList
 
 last
-  :: ( 1 <= m
-     , CmpNat n Infinity ~ LT
-     )
+  :: 1 <= m
   => (m...n) a
   -> a
 last
@@ -418,51 +343,43 @@ last
     . toList
 
 replicate
-  :: KnownNat m
+  :: forall m a.
+     KnownNat m
   => a
   -> (m...m) a
 replicate x
-  = res
-    where res = Sized $ L.replicate (fromIntegral . natVal $ num res) x
-          num :: (m...m) a -> Proxy m
-          num _ = Proxy
+  = Sized $ L.replicate (fromIntegral $ natVal (Proxy :: Proxy m)) x
+
 
 deleteFirstsBy
-  :: (m :-: Min m p) <= n
-  => (a -> a -> Bool)
+  :: (a -> a -> Bool)
   -> (m...n) a
   -> (o...p) a
-  -> ((m :-: Min m p)...n) a
+  -> ((m - Min m p)...n) a
 deleteFirstsBy f xs ys
   = Sized $ L.deleteFirstsBy f (toList xs) (toList ys)
 
 snoc
-  :: ( CmpNat m Infinity ~ LT
-     , (m:+:1) <= (n:+:1)
-     )
-  => a
+  :: a
   -> (m...n) a
-  -> ((m:+:1)...(n:+:1)) a
+  -> ((m+1)...(n+1)) a
 snoc x xs
   = xs ++ singleton x
 
 cons
-  :: (m:+:1) <= (n:+:1)
-  => a
+  :: a
   -> (m...n) a
-  -> ((m:+:1)...(n:+:1)) a
+  -> ((m+1)...(n+1)) a
 cons x
   = Sized
     . (x:)
     . toList
 
 insert
-  :: ( Ord a
-     , (m:+:1) <= (n:+:1)
-     )
+  :: Ord a
   => a
   -> (m...n) a
-  -> ((m:+:1)...(n:+:1)) a
+  -> ((m+1)...(n+1)) a
 insert x
   = Sized
     . L.insert x
@@ -475,15 +392,33 @@ singleton x
   = Sized [x]
 
 length
-  :: ( KnownNat m
+  :: forall m n a.
+     ( KnownNat m
      , KnownNat n
      )
   => (m...n) a
   -> Int
-length a@(Sized xs)
-  = if natVal lower == natVal upper
-       then fromIntegral (natVal lower)
-       else L.length xs
-    where f :: (m...n) a -> (Proxy m, Proxy n)
-          f _ = (Proxy, Proxy)
-          (lower, upper) = f a
+length (Sized xs)
+  = case sameNat Proxy Proxy :: Maybe (m :~: n) of
+      Just Refl -> fromIntegral $ natVal (Proxy :: Proxy m)
+      Nothing -> L.length xs
+
+reverse
+  :: (m...n) a
+  -> (m...n) a
+reverse (Sized xs)
+  = Sized $ L.reverse xs
+
+filter
+  :: (a -> Bool)
+  -> (m...n) a
+  -> (0...n) a
+filter f (Sized xs)
+  = Sized $ L.filter f xs
+
+intersperse
+  :: a
+  -> (m...n) a
+  -> ((Max (m*2) 1 - 1)...(Max (n*2) 1 - 1)) a
+intersperse x (Sized xs)
+  = Sized $ L.intersperse x xs
